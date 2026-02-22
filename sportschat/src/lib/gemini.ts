@@ -38,8 +38,8 @@ export async function ensureVideoUploaded(): Promise<{
   let waitCount = 0;
   while (file.state === "PROCESSING") {
     waitCount++;
-    console.log(`[gemini] Still processing... (${waitCount * 2}s)`);
-    await new Promise((r) => setTimeout(r, 2000));
+    console.log(`[gemini] Still processing... (${waitCount}s)`);
+    await new Promise((r) => setTimeout(r, 1000));
     file = await ai.files.get({ name: file.name! });
   }
 
@@ -80,4 +80,35 @@ export async function askAboutGame(
   const text = response.text ?? "Sorry, I couldn't generate a response.";
   console.log("[gemini] Response:", text.substring(0, 100) + "...");
   return text;
+}
+
+/** Stream response chunks for faster perceived latency */
+export async function* askAboutGameStream(
+  question: string,
+  timestamp: number,
+  expertise: ExpertiseLevel
+): AsyncGenerator<string, void, void> {
+  console.log(`[gemini] askAboutGameStream: "${question}" at ${timestamp}s, level=${expertise}`);
+
+  const videoFile = await ensureVideoUploaded();
+  const systemPrompt = buildPrompt(expertise, timestamp);
+
+  console.log("[gemini] Calling generateContentStream...");
+  const stream = await ai.models.generateContentStream({
+    model: "gemini-2.5-flash",
+    contents: [
+      {
+        role: "user",
+        parts: [
+          createPartFromUri(videoFile.uri, videoFile.mimeType),
+          { text: systemPrompt + "\n\nUser question: " + question },
+        ],
+      },
+    ],
+  });
+
+  for await (const chunk of stream) {
+    const text = chunk.text;
+    if (text) yield text;
+  }
 }

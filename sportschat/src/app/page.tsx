@@ -38,6 +38,14 @@ export default function Home() {
       .catch(() => setSetupStatus("idle"));
   }, []);
 
+  // Pre-upload video to Gemini when setup is ready (first ask will be faster)
+  useEffect(() => {
+    if (setupStatus !== "ready") return;
+    fetch("/api/prepare", { method: "POST" }).catch(() => {
+      /* ignore; will retry on first ask */
+    });
+  }, [setupStatus]);
+
   async function handleDownload() {
     if (!url.trim()) return;
     setSetupStatus("downloading");
@@ -117,39 +125,75 @@ export default function Home() {
           expertise,
         }),
       });
-      const data = await res.json();
 
-      if (data.answer) {
-        setAnswer(data.answer);
-        // TTS via ElevenLabs
-        if (!isMuted) {
-          // Stop any currently playing audio
-          if (audioRef.current) {
-            audioRef.current.pause();
-            audioRef.current = null;
-          }
-          fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: data.answer }),
-          })
-            .then((res) => {
-              if (!res.ok) throw new Error("TTS failed");
-              return res.blob();
-            })
-            .then((blob) => {
-              const url = URL.createObjectURL(blob);
-              const audio = new Audio(url);
-              audioRef.current = audio;
-              audio.onended = () => URL.revokeObjectURL(url);
-              audio.play();
-            })
-            .catch(() => {
-              // Silent fallback — text overlay is already showing
-            });
-        }
-      } else {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         setAnswer(data.error || "Couldn't get a response. Try again!");
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) {
+        setAnswer("Couldn't read response stream.");
+        return;
+      }
+
+      let fullText = "";
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6)) as { text?: string; done?: boolean; error?: string };
+              if (data.text) {
+                fullText += data.text;
+                setAnswer(fullText);
+              }
+              if (data.error) {
+                setAnswer(data.error);
+                break;
+              }
+            } catch {
+              /* ignore parse errors */
+            }
+          }
+        }
+      }
+
+      // TTS via ElevenLabs when full answer is received
+      if (fullText && !isMuted) {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+        fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: fullText }),
+        })
+          .then((r) => {
+            if (!r.ok) throw new Error("TTS failed");
+            return r.blob();
+          })
+          .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audioRef.current = audio;
+            audio.onended = () => URL.revokeObjectURL(url);
+            audio.play();
+          })
+          .catch(() => {
+            /* silent fallback — text overlay is already showing */
+          });
       }
     } catch {
       setAnswer("Something went wrong. Try again!");
