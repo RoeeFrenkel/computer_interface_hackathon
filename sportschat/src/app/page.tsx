@@ -5,6 +5,7 @@ import { ExpertiseLevel } from "@/lib/types";
 import AnswerOverlay from "@/components/AnswerOverlay";
 import ExpertiseToggle from "@/components/ExpertiseToggle";
 import MuteToggle from "@/components/MuteToggle";
+import VoiceInput from "@/components/VoiceInput";
 
 export default function Home() {
   // Setup state
@@ -20,6 +21,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [question, setQuestion] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // Check if video exists on load
   useEffect(() => {
@@ -119,12 +121,32 @@ export default function Home() {
 
       if (data.answer) {
         setAnswer(data.answer);
-        // TTS
-        if (!isMuted && "speechSynthesis" in window) {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(data.answer);
-          utterance.rate = 1.1;
-          window.speechSynthesis.speak(utterance);
+        // TTS via ElevenLabs
+        if (!isMuted) {
+          // Stop any currently playing audio
+          if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current = null;
+          }
+          fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: data.answer }),
+          })
+            .then((res) => {
+              if (!res.ok) throw new Error("TTS failed");
+              return res.blob();
+            })
+            .then((blob) => {
+              const url = URL.createObjectURL(blob);
+              const audio = new Audio(url);
+              audioRef.current = audio;
+              audio.onended = () => URL.revokeObjectURL(url);
+              audio.play();
+            })
+            .catch(() => {
+              // Silent fallback — text overlay is already showing
+            });
         }
       } else {
         setAnswer(data.error || "Couldn't get a response. Try again!");
@@ -215,7 +237,14 @@ export default function Home() {
         </h1>
         <div className="flex items-center gap-3">
           <ExpertiseToggle level={expertise} onChange={setExpertise} />
-          <MuteToggle isMuted={isMuted} onToggle={() => setIsMuted(!isMuted)} />
+          <MuteToggle isMuted={isMuted} onToggle={() => {
+            const next = !isMuted;
+            setIsMuted(next);
+            if (next && audioRef.current) {
+              audioRef.current.pause();
+              audioRef.current = null;
+            }
+          }} />
         </div>
       </header>
 
@@ -234,13 +263,14 @@ export default function Home() {
 
       {/* Bottom input bar */}
       <footer className="border-t border-zinc-800 px-6 py-4">
-        <div className="max-w-5xl mx-auto flex gap-3">
+        <div className="max-w-5xl mx-auto flex items-center gap-3">
+          <VoiceInput onTranscript={handleAsk} disabled={isLoading} />
           <input
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAsk()}
-            placeholder="Ask about the game... (e.g. 'What just happened?' or 'What's a pick and roll?')"
+            placeholder="Ask about the game... or hold the mic to talk"
             className="flex-1 rounded-lg bg-zinc-900 border border-zinc-700 px-4 py-3 text-white placeholder-zinc-500 focus:outline-none focus:border-orange-500 transition-colors"
             disabled={isLoading}
           />
